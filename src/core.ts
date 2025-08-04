@@ -33,7 +33,7 @@ export async function getMicrophonePermissionsAsync(): Promise<PermissionRespons
   return ExpoTwoWayAudioModule.getMicrophonePermissionsAsync();
 }
 
-export function getByteFrequencyData(): number[] {
+export async function getByteFrequencyData(): number[] {
   return ExpoTwoWayAudioModule.getByteFrequencyData();
 }
 
