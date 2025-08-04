@@ -296,6 +296,16 @@ class AudioEngine (context: Context) {
         }
     }
 
+    fun clearAudioQueue() {
+        synchronized(audioSampleQueue) {
+            audioSampleQueue.clear()
+        }
+        audioTrack.flush() // Clears any buffered audio data from the AudioTrack
+        onOutputVolumeCallback?.invoke(0.0f)
+        Log.i("AudioEngine", "Output audio queue cleared.")
+    }
+
+
     @RequiresApi(Build.VERSION_CODES.Q)
     fun pauseRecordingAndPlayer() {
         isRecordingBeforePause = isRecording
