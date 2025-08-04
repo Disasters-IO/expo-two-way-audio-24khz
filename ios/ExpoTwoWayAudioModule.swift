@@ -47,6 +47,16 @@ public class ExpoTwoWayAudioModule: Module {
             return audioEngine.isRecording
         }
 
+        Function("clearQueue") { () -> Bool in
+            guard let audioEngine = self.audioEngine else {
+                print("AudioEngine not initialized")
+                return false
+            }
+            audioEngine.clearAudioQueue()
+            return true
+        }
+
+
         Function("toggleRecording") { (val: Bool) -> Bool in
             guard let audioEngine = self.audioEngine else {
                 print("AudioEngine not initialized")
