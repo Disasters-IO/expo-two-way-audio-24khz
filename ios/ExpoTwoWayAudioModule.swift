@@ -56,12 +56,12 @@ public class ExpoTwoWayAudioModule: Module {
             return true
         }
 
-        Function("getFrequencyData") { () -> [Float] in
+        Function("getFrequencyData") { () -> [UInt8] in
             guard let audioEngine = self.audioEngine else {
                 print("AudioEngine not initialized")
                 return []
             }
-            return audioEngine.getFrequencyData()
+            return audioEngine.getByteFrequencyData()
         }
 
         Function("toggleRecording") { (val: Bool) -> Bool in
