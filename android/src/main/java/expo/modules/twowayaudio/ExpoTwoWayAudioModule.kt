@@ -58,6 +58,23 @@ class ExpoTwoWayAudioModule : Module() {
              ))
          }
 
+         Function("clearQueue") {
+                try {
+                    if (audioEngine != null) {
+                        audioEngine.clearAudioQueue()
+                        true
+                    } else {
+                        false
+                    }
+                } catch (e: Exception) {
+                    Log.e("AudioModule", "Failed to clear audio queue", e)
+                    false
+                }
+            }
+
+
+
+
          Function("playPCMData") { data: kotlin.ByteArray ->
              audioEngine?.playPCMData(data)
          }
