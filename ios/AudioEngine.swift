@@ -235,10 +235,10 @@ class AudioEngine {
     }
 
     func clearAudioQueue() {
-        speechPlayer.stop()    // Stops any current playback and clears the buffer queue
-        speechPlayer.reset()   // Resets the player node to a clean state
-        updateOutputVolume()   // Optional: Update output level to reflect silence
-        print("Audio queue cleared.")
+        speechPlayer.stop()    // Halts playback and drops all queued buffers
+        speechPlayer.reset()   // Resets internal state so new buffers start cleanly
+        updateOutputVolume()   // Reflects silence in output volume callback
+        print("Output audio queue has been cleared.")
     }
 
     func bypassVoiceProcessing(_ bypass: Bool) {
