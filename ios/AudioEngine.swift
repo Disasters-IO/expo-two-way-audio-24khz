@@ -233,7 +233,14 @@ class AudioEngine {
         
         return buffer
     }
-    
+
+    func clearAudioQueue() {
+        speechPlayer.stop()    // Stops any current playback and clears the buffer queue
+        speechPlayer.reset()   // Resets the player node to a clean state
+        updateOutputVolume()   // Optional: Update output level to reflect silence
+        print("Audio queue cleared.")
+    }
+
     func bypassVoiceProcessing(_ bypass: Bool) {
         let input = avAudioEngine.inputNode
         input.isVoiceProcessingBypassed = bypass
