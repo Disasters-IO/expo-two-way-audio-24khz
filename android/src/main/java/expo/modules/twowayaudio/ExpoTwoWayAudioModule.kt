@@ -73,6 +73,19 @@ class ExpoTwoWayAudioModule : Module() {
             }
 
 
+        AsyncFunction("getByteFrequencyData") { promise: Promise ->
+            try {
+                val byteData = audioEngine?.getByteFrequencyData()
+                if (byteData != null) {
+                    promise.resolve(byteData)
+                } else {
+                    promise.resolve(null)
+                }
+            } catch (e: Exception) {
+                Log.e("AudioModule", "Error computing frequency data", e)
+                promise.reject("FFT_ERROR", "Failed to compute frequency data")
+            }
+        }
 
 
          Function("playPCMData") { data: kotlin.ByteArray ->
