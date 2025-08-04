@@ -3,6 +3,7 @@ import Foundation
 import Accelerate
 
 class AudioEngine {
+    private var lastOutputBuffer: AVAudioPCMBuffer?
     private var avAudioEngine = AVAudioEngine()
     private var speechPlayer = AVAudioPlayerNode()
     private var engineConfigChangeObserver: Any?
@@ -178,6 +179,8 @@ class AudioEngine {
             outputBuffer[outputBufferIndex] = floatSample
             outputBufferIndex = (outputBufferIndex + 1) % outputBuffer.count
         }
+
+        lastOutputBuffer = buffer
     }
 
     func start() {
@@ -365,20 +368,20 @@ class AudioEngine {
         return adjustedValue
     }
 
-    func getFrequencyData() -> [Float] {
-        guard let buffer = lastMicBuffer else { return [] } // lastMicBuffer is updated in mic tap
+    func getByteFrequencyData() -> [UInt8] {
+        guard let buffer = lastOutputBuffer else { return [] }
+        guard let channelData = buffer.floatChannelData?[0] else { return [] }
     
-        let channelData = buffer.floatChannelData![0]
         var window = [Float](repeating: 0, count: fftSize)
         var windowedSignal = [Float](repeating: 0, count: fftSize)
         vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
         vDSP_vmul(channelData, 1, window, 1, &windowedSignal, 1, vDSP_Length(fftSize))
     
+        fftSetup = fftSetup ?? vDSP_create_fftsetup(log2n, Int32(kFFTRadix2))
         var realp = [Float](repeating: 0, count: fftSize / 2)
         var imagp = [Float](repeating: 0, count: fftSize / 2)
         var output = DSPSplitComplex(realp: &realp, imagp: &imagp)
     
-        fftSetup = fftSetup ?? vDSP_create_fftsetup(log2n, Int32(kFFTRadix2))
         windowedSignal.withUnsafeMutableBufferPointer { ptr in
             ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize) {
                 vDSP_ctoz($0, 2, &output, 1, vDSP_Length(fftSize / 2))
@@ -389,16 +392,19 @@ class AudioEngine {
     
         var magnitudes = [Float](repeating: 0, count: fftSize / 2)
         vDSP_zvmags(&output, 1, &magnitudes, 1, vDSP_Length(fftSize / 2))
+        vvsqrtf(&magnitudes, magnitudes, [Int32(magnitudes.count)])
     
-        var normalizedMagnitudes = [Float](repeating: 0, count: fftSize / 2)
-        vDSP_vsmul(sqrtArray(magnitudes), 1, [2.0 / Float(fftSize)], &normalizedMagnitudes, 1, vDSP_Length(fftSize / 2))
+        // Normalize to 0–255
+        var normalized = [Float](repeating: 0, count: fftSize / 2)
+        let maxMag = magnitudes.max() ?? 1.0
+        vDSP_vsdiv(magnitudes, 1, [maxMag == 0 ? 1 : maxMag], &normalized, 1, vDSP_Length(fftSize / 2))
     
-        return normalizedMagnitudes
-    }
+        // Scale to 0–255 and convert to UInt8
+        var byteData = [UInt8](repeating: 0, count: fftSize / 2)
+        for i in 0..<normalized.count {
+            byteData[i] = UInt8(min(max(normalized[i] * 255.0, 0.0), 255.0))
+        }
     
-    private func sqrtArray(_ input: [Float]) -> [Float] {
-        var result = [Float](repeating: 0.0, count: input.count)
-        vvsqrtf(&result, input, [Int32(input.count)])
-        return result
+        return byteData
     }
 }
