@@ -44,3 +44,8 @@ export function getMicrophoneModeIOS() {
 export function setMicrophoneModeIOS() {
   return ExpoTwoWayAudioModule.setMicrophoneModeIOS();
 }
+
+export function clearQueue() {
+  return ExpoTwoWayAudioModule.clearQueue()
+}
+
