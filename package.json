@@ -21,9 +21,9 @@
   "keywords": ["react-native", "expo", "expo-two-way-audio", "ExpoTwoWayAudio"],
   "repository": "https://github.com/speechmatics/expo-two-way-audio",
   "bugs": {
-    "url": "https://github.com/speechmatics/expo-two-way-audio/issues"
+    "url": "https://github.com/Browsify/expo-two-way-audio-24khz/issues"
   },
-  "author": "Speechmatics <devrel@speechmatics.com> (https://github.com/speechmatics)",
+  "author": "Main Repo Author: Speechmatics <devrel@speechmatics.com> (https://github.com/speechmatics), Forked By: Browsify",
   "license": "MIT",
   "homepage": "https://github.com/speechmatics/expo-two-way-audio#readme",
   "devDependencies": {
