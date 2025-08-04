@@ -18,6 +18,7 @@ import java.util.LinkedList
 import java.util.Queue
 import java.util.concurrent.Executors
 import kotlin.math.pow
+import org.jtransforms.fft.DoubleFFT_1D
 
 
 class AudioEngine (context: Context) {
@@ -257,6 +258,40 @@ class AudioEngine (context: Context) {
             playAudioFromSampleQueue()
         }
     }
+
+    fun getByteFrequencyData(): ByteArray? {
+        val latestAudioData = audioSampleQueue.lastOrNull() ?: return null
+    
+        // Convert byte array to double array (16-bit PCM -> -1.0 to 1.0 float -> double)
+        val buffer = DoubleArray(latestAudioData.size / 2)
+        for (i in buffer.indices) {
+            val sample = (latestAudioData[i * 2].toInt() or (latestAudioData[i * 2 + 1].toInt() shl 8)).toShort()
+            buffer[i] = sample / 32768.0
+        }
+    
+        val fft = DoubleFFT_1D(buffer.size.toLong())
+        val fftData = buffer.copyOf() // JTransforms operates in-place
+        fft.realForward(fftData)
+    
+        // Compute magnitude spectrum
+        val magnitude = DoubleArray(buffer.size / 2)
+        for (i in magnitude.indices) {
+            val re = fftData[2 * i]
+            val im = fftData[2 * i + 1]
+            magnitude[i] = kotlin.math.sqrt(re * re + im * im)
+        }
+    
+        // Normalize and convert to UInt8 (0–255)
+        val byteData = ByteArray(magnitude.size)
+        val maxMagnitude = magnitude.maxOrNull() ?: 1.0
+        for (i in magnitude.indices) {
+            val normalized = (magnitude[i] / maxMagnitude).coerceIn(0.0, 1.0)
+            byteData[i] = (normalized * 255).toInt().toByte()
+        }
+    
+        return byteData
+    }
+
 
     private fun playAudioFromSampleQueue() {
         executorServicePlayback.execute{
