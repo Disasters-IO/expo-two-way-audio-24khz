@@ -44,6 +44,7 @@ class AudioEngine (context: Context) {
     private var byteData: ByteArray? = null
     private var fft: DoubleFFT_1D? = null
     private var lastBufferSize = 0
+    private var lastAudioDataForFFT: ByteArray? = null
 
     var isRecording = false
     private var isRecordingBeforePause = false
@@ -262,13 +263,15 @@ class AudioEngine (context: Context) {
 
     fun playPCMData(data: ByteArray) {
         audioSampleQueue.add(data)
+        // Store a copy for FFT analysis to avoid interfering with playback
+        lastAudioDataForFFT = data.copyOf()
         if (!isPlaying) {
             playAudioFromSampleQueue()
         }
     }
 
     fun getByteFrequencyData(): ByteArray? {
-        val latestAudioData = audioSampleQueue.lastOrNull() ?: return byteData
+        val latestAudioData = lastAudioDataForFFT ?: return byteData
         
         val bufferSize = latestAudioData.size / 2
         

@@ -4,6 +4,7 @@ import Accelerate
 
 class AudioEngine {
     private var lastOutputBuffer: AVAudioPCMBuffer?
+    private var lastOutputBufferForFFT: AVAudioPCMBuffer?
     private var avAudioEngine = AVAudioEngine()
     private var speechPlayer = AVAudioPlayerNode()
     private var engineConfigChangeObserver: Any?
@@ -192,6 +193,16 @@ class AudioEngine {
         }
 
         lastOutputBuffer = buffer
+        
+        // Create a copy for FFT analysis to avoid interfering with playback
+        if let bufferCopy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameCapacity) {
+            bufferCopy.frameLength = buffer.frameLength
+            if let sourceData = buffer.floatChannelData?[0],
+               let destData = bufferCopy.floatChannelData?[0] {
+                memcpy(destData, sourceData, Int(buffer.frameLength) * MemoryLayout<Float>.size)
+            }
+            lastOutputBufferForFFT = bufferCopy
+        }
     }
 
     func start() {
@@ -379,7 +390,7 @@ class AudioEngine {
     }
 
     func getByteFrequencyData() -> [UInt8] {
-        guard let buffer = lastOutputBuffer else { return fftByteData }
+        guard let buffer = lastOutputBufferForFFT else { return fftByteData }
         guard let channelData = buffer.floatChannelData?[0] else { return fftByteData }
         
         // Initialize FFT setup and window only once
