@@ -45,6 +45,7 @@ class AudioEngine (context: Context) {
     private var fft: DoubleFFT_1D? = null
     private var lastBufferSize = 0
     private var lastAudioDataForFFT: ByteArray? = null
+    private var isFFTDataReady = false
 
     var isRecording = false
     private var isRecordingBeforePause = false
@@ -263,8 +264,16 @@ class AudioEngine (context: Context) {
 
     fun playPCMData(data: ByteArray) {
         audioSampleQueue.add(data)
-        // Store a copy for FFT analysis to avoid interfering with playback
-        lastAudioDataForFFT = data.copyOf()
+        // Only copy data for FFT if the buffer size changed or we don't have data yet
+        if (lastAudioDataForFFT == null || data.size != lastAudioDataForFFT!!.size) {
+            lastAudioDataForFFT = ByteArray(data.size)
+            isFFTDataReady = false
+        }
+        // Copy only if we haven't updated recently (reduce copy frequency)
+        if (!isFFTDataReady) {
+            System.arraycopy(data, 0, lastAudioDataForFFT!!, 0, data.size)
+            isFFTDataReady = true
+        }
         if (!isPlaying) {
             playAudioFromSampleQueue()
         }
@@ -326,6 +335,9 @@ class AudioEngine (context: Context) {
             result[i] = normalized.toInt().toByte()
             i++
         }
+        
+        // Mark that we need fresh data for next FFT
+        isFFTDataReady = false
         
         return result
     }

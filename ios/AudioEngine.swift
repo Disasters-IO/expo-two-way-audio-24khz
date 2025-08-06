@@ -4,7 +4,7 @@ import Accelerate
 
 class AudioEngine {
     private var lastOutputBuffer: AVAudioPCMBuffer?
-    private var lastOutputBufferForFFT: AVAudioPCMBuffer?
+    private var fftAudioData: [Float] = []
     private var avAudioEngine = AVAudioEngine()
     private var speechPlayer = AVAudioPlayerNode()
     private var engineConfigChangeObserver: Any?
@@ -194,15 +194,12 @@ class AudioEngine {
 
         lastOutputBuffer = buffer
         
-        // Create a copy for FFT analysis to avoid interfering with playback
-        if let bufferCopy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameCapacity) {
-            bufferCopy.frameLength = buffer.frameLength
-            if let sourceData = buffer.floatChannelData?[0],
-               let destData = bufferCopy.floatChannelData?[0] {
-                memcpy(destData, sourceData, Int(buffer.frameLength) * MemoryLayout<Float>.size)
-            }
-            lastOutputBufferForFFT = bufferCopy
+        // Copy only the required amount of data for FFT (much lighter than buffer copying)
+        let copyCount = min(frameCount, fftSize)
+        if fftAudioData.count != copyCount {
+            fftAudioData = Array(repeating: 0.0, count: copyCount)
         }
+        memcpy(&fftAudioData, channelData, copyCount * MemoryLayout<Float>.size)
     }
 
     func start() {
@@ -390,8 +387,7 @@ class AudioEngine {
     }
 
     func getByteFrequencyData() -> [UInt8] {
-        guard let buffer = lastOutputBufferForFFT else { return fftByteData }
-        guard let channelData = buffer.floatChannelData?[0] else { return fftByteData }
+        guard !fftAudioData.isEmpty else { return fftByteData }
         
         // Initialize FFT setup and window only once
         if !isFFTInitialized {
@@ -402,8 +398,16 @@ class AudioEngine {
         
         guard let fftSetup = fftSetup else { return fftByteData }
         
+        // Ensure we have enough data, pad with zeros if necessary
+        var audioData = fftAudioData
+        if audioData.count < fftSize {
+            audioData.append(contentsOf: Array(repeating: 0.0, count: fftSize - audioData.count))
+        } else if audioData.count > fftSize {
+            audioData = Array(audioData.prefix(fftSize))
+        }
+        
         // Apply window to the signal - reusing pre-allocated buffers
-        vDSP_vmul(channelData, 1, fftWindow, 1, &fftWindowedSignal, 1, vDSP_Length(fftSize))
+        vDSP_vmul(audioData, 1, fftWindow, 1, &fftWindowedSignal, 1, vDSP_Length(fftSize))
         
         // Convert to split complex format
         var output = DSPSplitComplex(realp: &fftRealp, imagp: &fftImagp)
