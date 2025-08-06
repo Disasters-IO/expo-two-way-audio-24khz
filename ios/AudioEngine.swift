@@ -13,7 +13,15 @@ class AudioEngine {
     private var log2n: vDSP_Length = 10 // 1024 samples
     private var fftSize: Int { 1 << log2n }
     
-    private var fftMagnitudes: [Float] = []
+    // Pre-allocated buffers for getByteFrequencyData optimization
+    private lazy var fftWindow = [Float](repeating: 0, count: fftSize)
+    private lazy var fftWindowedSignal = [Float](repeating: 0, count: fftSize)
+    private lazy var fftRealp = [Float](repeating: 0, count: fftSize / 2)
+    private lazy var fftImagp = [Float](repeating: 0, count: fftSize / 2)
+    private lazy var fftMagnitudes = [Float](repeating: 0, count: fftSize / 2)
+    private lazy var fftNormalized = [Float](repeating: 0, count: fftSize / 2)
+    private lazy var fftByteData = [UInt8](repeating: 0, count: fftSize / 2)
+    private var isFFTInitialized = false
     
     public private(set) var voiceIOFormat: AVAudioFormat
     public private(set) var isRecording = false
@@ -81,6 +89,9 @@ class AudioEngine {
         }
         if let observer = mediaServicesResetObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+        if let setup = fftSetup {
+            vDSP_destroy_fftsetup(setup)
         }
     }
     
@@ -244,10 +255,9 @@ class AudioEngine {
     }
 
     func clearAudioQueue() {
-        speechPlayer.stop()    // Halts playback and drops all queued buffers
-        speechPlayer.reset()   // Resets internal state so new buffers start cleanly
-        updateOutputVolume()   // Reflects silence in output volume callback
-        print("Output audio queue has been cleared.")
+        speechPlayer.stop()
+        speechPlayer.reset()
+        updateOutputVolume()
     }
 
     func bypassVoiceProcessing(_ bypass: Bool) {
@@ -369,42 +379,47 @@ class AudioEngine {
     }
 
     func getByteFrequencyData() -> [UInt8] {
-        guard let buffer = lastOutputBuffer else { return [] }
-        guard let channelData = buffer.floatChannelData?[0] else { return [] }
-    
-        var window = [Float](repeating: 0, count: fftSize)
-        var windowedSignal = [Float](repeating: 0, count: fftSize)
-        vDSP_hann_window(&window, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
-        vDSP_vmul(channelData, 1, window, 1, &windowedSignal, 1, vDSP_Length(fftSize))
-    
-        fftSetup = fftSetup ?? vDSP_create_fftsetup(log2n, Int32(kFFTRadix2))
-        var realp = [Float](repeating: 0, count: fftSize / 2)
-        var imagp = [Float](repeating: 0, count: fftSize / 2)
-        var output = DSPSplitComplex(realp: &realp, imagp: &imagp)
-    
-        windowedSignal.withUnsafeMutableBufferPointer { ptr in
+        guard let buffer = lastOutputBuffer else { return fftByteData }
+        guard let channelData = buffer.floatChannelData?[0] else { return fftByteData }
+        
+        // Initialize FFT setup and window only once
+        if !isFFTInitialized {
+            fftSetup = vDSP_create_fftsetup(log2n, Int32(kFFTRadix2))
+            vDSP_hann_window(&fftWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
+            isFFTInitialized = true
+        }
+        
+        guard let fftSetup = fftSetup else { return fftByteData }
+        
+        // Apply window to the signal - reusing pre-allocated buffers
+        vDSP_vmul(channelData, 1, fftWindow, 1, &fftWindowedSignal, 1, vDSP_Length(fftSize))
+        
+        // Convert to split complex format
+        var output = DSPSplitComplex(realp: &fftRealp, imagp: &fftImagp)
+        fftWindowedSignal.withUnsafeMutableBufferPointer { ptr in
             ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize) {
                 vDSP_ctoz($0, 2, &output, 1, vDSP_Length(fftSize / 2))
             }
         }
-    
-        vDSP_fft_zrip(fftSetup!, &output, 1, log2n, FFTDirection(FFT_FORWARD))
-    
-        var magnitudes = [Float](repeating: 0, count: fftSize / 2)
-        vDSP_zvmags(&output, 1, &magnitudes, 1, vDSP_Length(fftSize / 2))
-        vvsqrtf(&magnitudes, magnitudes, [Int32(magnitudes.count)])
-    
-        // Normalize to 0–255
-        var normalized = [Float](repeating: 0, count: fftSize / 2)
-        let maxMag = magnitudes.max() ?? 1.0
-        vDSP_vsdiv(magnitudes, 1, [maxMag == 0 ? 1 : maxMag], &normalized, 1, vDSP_Length(fftSize / 2))
-    
-        // Scale to 0–255 and convert to UInt8
-        var byteData = [UInt8](repeating: 0, count: fftSize / 2)
-        for i in 0..<normalized.count {
-            byteData[i] = UInt8(min(max(normalized[i] * 255.0, 0.0), 255.0))
-        }
-    
-        return byteData
+        
+        // Perform FFT
+        vDSP_fft_zrip(fftSetup, &output, 1, log2n, FFTDirection(FFT_FORWARD))
+        
+        // Calculate magnitudes and take square root
+        vDSP_zvmags(&output, 1, &fftMagnitudes, 1, vDSP_Length(fftSize / 2))
+        vvsqrtf(&fftMagnitudes, fftMagnitudes, [Int32(fftSize / 2)])
+        
+        // Find max and normalize in one pass
+        var maxMag: Float = 0
+        vDSP_maxv(fftMagnitudes, 1, &maxMag, vDSP_Length(fftSize / 2))
+        let divisor = maxMag > 0 ? maxMag : 1.0
+        vDSP_vsdiv(fftMagnitudes, 1, [divisor], &fftNormalized, 1, vDSP_Length(fftSize / 2))
+        
+        // Convert to UInt8 using vectorized operations
+        var scale: Float = 255.0
+        vDSP_vsmul(fftNormalized, 1, &scale, &fftNormalized, 1, vDSP_Length(fftSize / 2))
+        vDSP_vfixu8(fftNormalized, 1, &fftByteData, 1, vDSP_Length(fftSize / 2))
+        
+        return fftByteData
     }
 }

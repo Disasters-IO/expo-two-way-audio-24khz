@@ -60,31 +60,15 @@ class ExpoTwoWayAudioModule : Module() {
 
          Function("clearQueue") {
                 try {
-                    if (audioEngine != null) {
-                        audioEngine.clearAudioQueue()
-                        true
-                    } else {
-                        false
-                    }
+                    audioEngine?.clearAudioQueue()
+                    true
                 } catch (e: Exception) {
-                    Log.e("AudioModule", "Failed to clear audio queue", e)
                     false
                 }
             }
 
-
-        AsyncFunction("getByteFrequencyData") { promise: Promise ->
-            try {
-                val byteData = audioEngine?.getByteFrequencyData()
-                if (byteData != null) {
-                    promise.resolve(byteData)
-                } else {
-                    promise.resolve(null)
-                }
-            } catch (e: Exception) {
-                Log.e("AudioModule", "Error computing frequency data", e)
-                promise.reject("FFT_ERROR", "Failed to compute frequency data")
-            }
+        Function("getByteFrequencyData") {
+            audioEngine?.getByteFrequencyData()
         }
 
 
