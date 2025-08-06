@@ -37,16 +37,6 @@ class AudioEngine (context: Context) {
     private val executorServicePlayback = Executors.newFixedThreadPool(1)
     private var speakerDevice: AudioDeviceInfo? = null
 
-    // Pre-allocated buffers for FFT optimization
-    private var fftBuffer: DoubleArray? = null
-    private var fftData: DoubleArray? = null
-    private var magnitude: DoubleArray? = null
-    private var byteData: ByteArray? = null
-    private var fft: DoubleFFT_1D? = null
-    private var lastBufferSize = 0
-    private var lastAudioDataForFFT: ByteArray? = null
-    private var isFFTDataReady = false
-
     var isRecording = false
     private var isRecordingBeforePause = false
     var isPlaying = false
@@ -264,82 +254,42 @@ class AudioEngine (context: Context) {
 
     fun playPCMData(data: ByteArray) {
         audioSampleQueue.add(data)
-        // Only copy data for FFT if the buffer size changed or we don't have data yet
-        if (lastAudioDataForFFT == null || data.size != lastAudioDataForFFT!!.size) {
-            lastAudioDataForFFT = ByteArray(data.size)
-            isFFTDataReady = false
-        }
-        // Copy only if we haven't updated recently (reduce copy frequency)
-        if (!isFFTDataReady) {
-            System.arraycopy(data, 0, lastAudioDataForFFT!!, 0, data.size)
-            isFFTDataReady = true
-        }
         if (!isPlaying) {
             playAudioFromSampleQueue()
         }
     }
 
     fun getByteFrequencyData(): ByteArray? {
-        val latestAudioData = lastAudioDataForFFT ?: return byteData
-        
-        val bufferSize = latestAudioData.size / 2
-        
-        // Initialize or resize buffers if needed
-        if (bufferSize != lastBufferSize) {
-            fftBuffer = DoubleArray(bufferSize)
-            fftData = DoubleArray(bufferSize)
-            magnitude = DoubleArray(bufferSize / 2)
-            byteData = ByteArray(bufferSize / 2)
-            fft = DoubleFFT_1D(bufferSize.toLong())
-            lastBufferSize = bufferSize
+        val latestAudioData = audioSampleQueue.lastOrNull() ?: return null
+    
+        // Convert byte array to double array (16-bit PCM -> -1.0 to 1.0 float -> double)
+        val buffer = DoubleArray(latestAudioData.size / 2)
+        for (i in buffer.indices) {
+            val sample = (latestAudioData[i * 2].toInt() or (latestAudioData[i * 2 + 1].toInt() shl 8)).toShort()
+            buffer[i] = sample / 32768.0
         }
-        
-        val buffer = fftBuffer!!
-        val data = fftData!!
-        val mag = magnitude!!
-        val result = byteData!!
-        val fftInstance = fft!!
-        
-        // Convert byte array to double array (optimized)
-        var bufferIndex = 0
-        var audioIndex = 0
-        while (bufferIndex < buffer.size) {
-            val sample = (latestAudioData[audioIndex].toInt() or (latestAudioData[audioIndex + 1].toInt() shl 8)).toShort()
-            buffer[bufferIndex] = sample * 3.0517578125e-5 // Optimized division by 32768.0
-            bufferIndex++
-            audioIndex += 2
+    
+        val fft = DoubleFFT_1D(buffer.size.toLong())
+        val fftData = buffer.copyOf() // JTransforms operates in-place
+        fft.realForward(fftData)
+    
+        // Compute magnitude spectrum
+        val magnitude = DoubleArray(buffer.size / 2)
+        for (i in magnitude.indices) {
+            val re = fftData[2 * i]
+            val im = fftData[2 * i + 1]
+            magnitude[i] = kotlin.math.sqrt(re * re + im * im)
         }
-        
-        // Copy buffer to fftData for in-place FFT
-        System.arraycopy(buffer, 0, data, 0, buffer.size)
-        fftInstance.realForward(data)
-        
-        // Compute magnitude spectrum (optimized)
-        var maxMag = 0.0
-        var i = 0
-        val halfSize = mag.size
-        while (i < halfSize) {
-            val re = data[i shl 1]
-            val im = data[(i shl 1) + 1]
-            val magnitude = kotlin.math.sqrt(re * re + im * im)
-            mag[i] = magnitude
-            if (magnitude > maxMag) maxMag = magnitude
-            i++
+    
+        // Normalize and convert to UInt8 (0–255)
+        val byteData = ByteArray(magnitude.size)
+        val maxMagnitude = magnitude.maxOrNull() ?: 1.0
+        for (i in magnitude.indices) {
+            val normalized = (magnitude[i] / maxMagnitude).coerceIn(0.0, 1.0)
+            byteData[i] = (normalized * 255).toInt().toByte()
         }
-        
-        // Normalize and convert to bytes (optimized)
-        val scale = if (maxMag > 0.0) 255.0 / maxMag else 255.0
-        i = 0
-        while (i < halfSize) {
-            val normalized = (mag[i] * scale).coerceAtMost(255.0)
-            result[i] = normalized.toInt().toByte()
-            i++
-        }
-        
-        // Mark that we need fresh data for next FFT
-        isFFTDataReady = false
-        
-        return result
+    
+        return byteData
     }
 
 
