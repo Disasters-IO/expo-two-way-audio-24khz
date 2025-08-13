@@ -14,10 +14,14 @@ import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.RequiresApi
-import java.util.LinkedList
-import java.util.Queue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.pow
+import kotlin.math.sqrt
 import org.jtransforms.fft.DoubleFFT_1D
 
 
@@ -30,12 +34,30 @@ class AudioEngine (context: Context) {
     private lateinit var audioManager: AudioManager
     private lateinit var audioTrack: AudioTrack
     private var audioFocusRequest: AudioFocusRequest? = null
-    private val audioSampleQueue: Queue<ByteArray> = LinkedList()
+    private val audioSampleQueue: ConcurrentLinkedQueue<ByteArray> = ConcurrentLinkedQueue()
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
-    private val executorServiceMicrophone = Executors.newFixedThreadPool(1)
-    private val executorServicePlayback = Executors.newFixedThreadPool(1)
+    private val executorServiceMicrophone = Executors.newSingleThreadExecutor()
+    private val executorServicePlayback = Executors.newSingleThreadExecutor()
     private var speakerDevice: AudioDeviceInfo? = null
+
+    // Playback loop coordination and queue bounding
+    private val isPlaybackWorkerRunning = AtomicBoolean(false)
+    private val MAX_QUEUE_SIZE = 64
+
+    // FFT state (reused across calls)
+    private val FFT_SIZE = 1024
+    private val fft = DoubleFFT_1D(FFT_SIZE.toLong())
+    private val fftPacked = DoubleArray(FFT_SIZE)
+    private val fftWindow = DoubleArray(FFT_SIZE) { i ->
+        0.5 - 0.5 * cos(2.0 * PI * i / (FFT_SIZE - 1))
+    }
+    private val fftMagnitudes = DoubleArray(FFT_SIZE / 2)
+    private val fftBytes = ByteArray(FFT_SIZE / 2)
+    private val outputRing = ByteArray(FFT_SIZE * 2)
+    private var outputRingWritePos = 0
+    @Volatile private var outputRingFilled = false
+    private val outputRingLock = Any()
 
     var isRecording = false
     private var isRecordingBeforePause = false
@@ -253,65 +275,80 @@ class AudioEngine (context: Context) {
     }
 
     fun playPCMData(data: ByteArray) {
+        // Bound the queue to keep latency under control
+        while (audioSampleQueue.size >= MAX_QUEUE_SIZE) {
+            audioSampleQueue.poll()
+        }
         audioSampleQueue.add(data)
-        if (!isPlaying) {
+        if (isPlaybackWorkerRunning.compareAndSet(false, true)) {
             playAudioFromSampleQueue()
         }
     }
 
     fun getByteFrequencyData(): ByteArray? {
-        val latestAudioData = audioSampleQueue.lastOrNull() ?: return null
-    
-        // Convert byte array to double array (16-bit PCM -> -1.0 to 1.0 float -> double)
-        val buffer = DoubleArray(latestAudioData.size / 2)
-        for (i in buffer.indices) {
-            val sample = (latestAudioData[i * 2].toInt() or (latestAudioData[i * 2 + 1].toInt() shl 8)).toShort()
-            buffer[i] = sample / 32768.0
+        if (!outputRingFilled) return fftBytes
+
+        synchronized(outputRingLock) {
+            var readPos = outputRingWritePos
+            var si = 0
+            while (si < FFT_SIZE) {
+                val b0 = outputRing[readPos].toInt()
+                val next = if (readPos + 1 < outputRing.size) readPos + 1 else 0
+                val b1 = outputRing[next].toInt()
+                val sample = (b0 or (b1 shl 8)).toShort().toInt()
+                val x = sample / 32768.0
+                fftPacked[si] = x * fftWindow[si]
+
+                readPos += 2
+                if (readPos >= outputRing.size) readPos = 0
+                si++
+            }
+
+            fft.realForward(fftPacked)
+
+            val n2 = FFT_SIZE / 2
+            fftMagnitudes[0] = abs(fftPacked[0])
+            fftMagnitudes[n2 - 1] = abs(fftPacked[1])
+            var k = 1
+            while (k < n2 - 1) {
+                val re = fftPacked[2 * k]
+                val im = fftPacked[2 * k + 1]
+                fftMagnitudes[k] = sqrt(re * re + im * im)
+                k++
+            }
+
+            var maxMag = 0.0
+            for (i in 0 until n2) if (fftMagnitudes[i] > maxMag) maxMag = fftMagnitudes[i]
+            val denom = if (maxMag > 0.0) maxMag else 1.0
+            var i = 0
+            while (i < n2) {
+                val v = (fftMagnitudes[i] / denom) * 255.0
+                fftBytes[i] = v.toInt().coerceIn(0, 255).toByte()
+                i++
+            }
         }
-    
-        val fft = DoubleFFT_1D(buffer.size.toLong())
-        val fftData = buffer.copyOf() // JTransforms operates in-place
-        fft.realForward(fftData)
-    
-        // Compute magnitude spectrum
-        val magnitude = DoubleArray(buffer.size / 2)
-        for (i in magnitude.indices) {
-            val re = fftData[2 * i]
-            val im = fftData[2 * i + 1]
-            magnitude[i] = kotlin.math.sqrt(re * re + im * im)
-        }
-    
-        // Normalize and convert to UInt8 (0–255)
-        val byteData = ByteArray(magnitude.size)
-        val maxMagnitude = magnitude.maxOrNull() ?: 1.0
-        for (i in magnitude.indices) {
-            val normalized = (magnitude[i] / maxMagnitude).coerceIn(0.0, 1.0)
-            byteData[i] = (normalized * 255).toInt().toByte()
-        }
-    
-        return byteData
+        return fftBytes
     }
 
 
     private fun playAudioFromSampleQueue() {
-        executorServicePlayback.execute{
+        executorServicePlayback.execute {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
             isPlaying = true
             try {
-                while (audioSampleQueue.isNotEmpty()){
-                    val data = audioSampleQueue.poll()
-                    if (data != null){
-                        playSample(data)
-                        val audioVolume = calculateRMSLevel(data)
-                        onOutputVolumeCallback?.invoke(audioVolume)
-                    }else{
-                        break
-                    }
+                while (true) {
+                    val data = audioSampleQueue.poll() ?: break
+                    playSample(data)
+                    feedOutputRing(data)
+                    val audioVolume = calculateRMSLevel(data)
+                    onOutputVolumeCallback?.invoke(audioVolume)
                 }
-            }catch (e: Exception){
+            } catch (e: Exception) {
                 Log.e("AudioEngine", "Error playing audio", e)
                 e.printStackTrace()
-            }finally {
+            } finally {
                 isPlaying = false
+                isPlaybackWorkerRunning.set(false)
                 onOutputVolumeCallback?.invoke(0.0F)
             }
         }
@@ -319,6 +356,24 @@ class AudioEngine (context: Context) {
 
     private fun playSample(data: ByteArray) {
         audioTrack.write(data, 0, data.size)
+    }
+
+    private fun feedOutputRing(data: ByteArray) {
+        synchronized(outputRingLock) {
+            var i = 0
+            while (i < data.size) {
+                outputRing[outputRingWritePos] = data[i]
+                val nextPos = outputRingWritePos + 1
+                outputRing[if (nextPos < outputRing.size) nextPos else 0] = data[i + 1]
+
+                outputRingWritePos += 2
+                if (outputRingWritePos >= outputRing.size) {
+                    outputRingWritePos = 0
+                    outputRingFilled = true
+                }
+                i += 2
+            }
+        }
     }
 
     fun bypassVoiceProcessing(bypass: Boolean) {
@@ -332,9 +387,7 @@ class AudioEngine (context: Context) {
     }
 
     fun clearAudioQueue() {
-        synchronized(audioSampleQueue) {
-            audioSampleQueue.clear()
-        }
+        audioSampleQueue.clear()
         audioTrack.flush()
         onOutputVolumeCallback?.invoke(0.0f)
     }
@@ -357,7 +410,8 @@ class AudioEngine (context: Context) {
     @SuppressLint("NewApi")
     fun tearDown() {
         stopRecording()
-        audioTrack.stop()
+    audioTrack.stop()
+    audioTrack.release()
         audioManager.mode = AudioManager.MODE_NORMAL
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             audioManager.clearCommunicationDevice()
@@ -366,37 +420,28 @@ class AudioEngine (context: Context) {
             audioManager.abandonAudioFocusRequest(request)
         }
         executorServiceMicrophone.shutdownNow()
+    executorServicePlayback.shutdownNow()
     }
 
 
     private fun calculateRMSLevel(buffer: ByteArray): Float {
         val epsilon = 1e-5f // To avoid log(0)
-
-        // Convert ByteArray to FloatArray by treating each pair of bytes as a single 16-bit PCM sample
-        val floatBuffer = FloatArray(buffer.size / 2)
-        for (i in floatBuffer.indices) {
-            // Combine two bytes into a 16-bit signed integer
-            val sample = (buffer[i * 2].toInt() or (buffer[i * 2 + 1].toInt() shl 8)).toShort()
-            // Normalize sample to -1.0 to 1.0 range for FloatArray
-            floatBuffer[i] = sample / 32768.0f
+        val sampleCount = buffer.size / 2
+        if (sampleCount == 0) return 0f
+        var sumSquares = 0.0
+        var i = 0
+        while (i < buffer.size) {
+            val sample = (buffer[i].toInt() or (buffer[i + 1].toInt() shl 8)).toShort().toInt()
+            val x = sample / 32768.0
+            sumSquares += x * x
+            i += 2
         }
-
-        // Calculate RMS value
-        val rmsValue = kotlin.math.sqrt(floatBuffer.fold(0f) { acc, sample -> acc + sample * sample } / floatBuffer.size)
-
-        // Convert to decibels
+        val rmsValue = kotlin.math.sqrt((sumSquares / sampleCount).toFloat())
         val dbValue = 20 * kotlin.math.log10(maxOf(rmsValue, epsilon))
-
-        // Normalize decibel value to 0-1 range
-        // Assuming minimum audible is -80dB and maximum is 0dB
         val minDb = -80.0f
         val normalizedValue = maxOf(0.0f, minOf(1.0f, (dbValue - minDb) / kotlin.math.abs(minDb)))
-
-        // Optional: Apply exponential factor to push smaller values down
-        val expFactor = 2.0f // Adjust this value to change the curve
-        val adjustedValue = normalizedValue.pow(expFactor)
-
-        return adjustedValue
+        val expFactor = 2.0f
+        return normalizedValue.pow(expFactor)
     }
 
 }

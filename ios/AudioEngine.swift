@@ -1,9 +1,11 @@
 import AVFoundation
 import Foundation
 import Accelerate
+import os.lock
 
 class AudioEngine {
-    private var lastOutputBuffer: AVAudioPCMBuffer?
+    // lastOutputBuffer is avoided for FFT; tap buffers are only valid inside the callback.
+    // private var lastOutputBuffer: AVAudioPCMBuffer?
     private var avAudioEngine = AVAudioEngine()
     private var speechPlayer = AVAudioPlayerNode()
     private var engineConfigChangeObserver: Any?
@@ -38,6 +40,10 @@ class AudioEngine {
     private var outputBuffer = [Float](repeating: 0, count: 2048)
     private var inputBufferIndex = 0
     private var outputBufferIndex = 0
+    private var micInt16Buffer = [Int16](repeating: 0, count: 1024)
+    private var outputSamplesWritten = 0
+    private var outputBufferPrimed = false
+    private var outputLock = os_unfair_lock()
     
     private var hasFirstInputBeenDiscarded = false
     private var discardRecording = false
@@ -110,6 +116,13 @@ class AudioEngine {
             print("Could not set the preferred sample rate: \(error.localizedDescription)")
         }
         
+        // Align IO buffer to FFT window (1024 samples @ 24kHz ≈ 42.7 ms)
+        do {
+            try session.setPreferredIOBufferDuration(1024.0 / 24000.0)
+        } catch {
+            print("Could not set IO buffer duration: \(error.localizedDescription)")
+        }
+        
         do {
             try session.setActive(true)
         } catch {
@@ -134,7 +147,7 @@ class AudioEngine {
         avAudioEngine.connect(speechPlayer, to: mainMixer, format: voiceIOFormat)
         avAudioEngine.connect(mainMixer, to: output, format: voiceIOFormat)
         
-        input.installTap(onBus: 0, bufferSize: 2048, format: voiceIOFormat) { [weak self] buffer, when in
+    input.installTap(onBus: 0, bufferSize: 1024, format: voiceIOFormat) { [weak self] buffer, when in
             // We don't do any input processing (no volume calculation or passing mic data to the callback) if discardRecording == true
             // See comment in the playPCMData function
             if self?.isRecording == true && self?.discardRecording == false {
@@ -143,7 +156,7 @@ class AudioEngine {
             }
         }
         
-        mainMixer.installTap(onBus: 0, bufferSize: 2048, format: voiceIOFormat) { [weak self] buffer, when in
+    mainMixer.installTap(onBus: 0, bufferSize: 1024, format: voiceIOFormat) { [weak self] buffer, when in
             self?.processOutputBuffer(buffer)
             self?.updateOutputVolume()
         }
@@ -158,19 +171,24 @@ class AudioEngine {
         }
         
         let frameCount = Int(buffer.frameLength)
-        var int16Samples = [Int16](repeating: 0, count: frameCount)
+        // Ensure scratch buffer capacity
+        if micInt16Buffer.count < frameCount {
+            micInt16Buffer = [Int16](repeating: 0, count: frameCount)
+        }
         
         // Convert float samples to Int16 and update input buffer for volume calculation
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
-            int16Samples[i] = Int16(floatSample * Float(Int16.max))
+            micInt16Buffer[i] = Int16(floatSample * Float(Int16.max))
             
             inputBuffer[inputBufferIndex] = floatSample
             inputBufferIndex = (inputBufferIndex + 1) % inputBuffer.count
         }
         
         // Create Data object from Int16 samples
-        let data = Data(bytes: int16Samples, count: frameCount * MemoryLayout<Int16>.size)
+        let data = micInt16Buffer.withUnsafeBytes { rawPtr in
+            Data(bytes: rawPtr.baseAddress!, count: frameCount * MemoryLayout<Int16>.size)
+        }
         
         // Send the data to the callback
         onMicDataCallback?(data)
@@ -181,17 +199,18 @@ class AudioEngine {
             print("Error: Could not access channel data")
             return
         }
-        
         let frameCount = Int(buffer.frameLength)
-        
-        // Update output buffer for volume calculation
+
+        // Update output ring buffer for volume calculation and FFT source
+        os_unfair_lock_lock(&outputLock)
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
             outputBuffer[outputBufferIndex] = floatSample
             outputBufferIndex = (outputBufferIndex + 1) % outputBuffer.count
         }
-
-        lastOutputBuffer = buffer
+        outputSamplesWritten &+= frameCount
+        if outputSamplesWritten >= fftSize { outputBufferPrimed = true }
+        os_unfair_lock_unlock(&outputLock)
     }
 
     func start() {
@@ -361,65 +380,65 @@ class AudioEngine {
     
     private func calculateRMSLevel(from buffer: [Float]) -> Float {
         let epsilon: Float = 1e-5 // To avoid log(0)
-        let rmsValue = sqrt(buffer.reduce(0) { $0 + $1 * $1 } / Float(buffer.count))
-        
-        // Convert to decibels
+        var meanSquare: Float = 0
+        buffer.withUnsafeBufferPointer { ptr in
+            vDSP_measqv(ptr.baseAddress!, 1, &meanSquare, vDSP_Length(buffer.count))
+        }
+        let rmsValue = sqrt(meanSquare)
         let dbValue = 20 * log10(max(rmsValue, epsilon))
-        
-        // Normalize decibel value to 0-1 range
-        // Assuming minimum audible is -60dB and maximum is 0dB
         let minDb: Float = -80.0
         let normalizedValue = max(0.0, min(1.0, (dbValue - minDb) / abs(minDb)))
-        
-        // Optional: Apply exponential factor to push smaller values down
-        let expFactor: Float = 2.0 // Adjust this value to change the curve
-        let adjustedValue = pow(normalizedValue, expFactor)
-        
-        return adjustedValue
+        let expFactor: Float = 2.0
+        return pow(normalizedValue, expFactor)
     }
 
     func getByteFrequencyData() -> [UInt8] {
-        guard let buffer = lastOutputBuffer else { return fftByteData }
-        guard let channelData = buffer.floatChannelData?[0] else { return fftByteData }
-        
-        // Initialize FFT setup and window only once
+        // Initialize FFT and window once
         if !isFFTInitialized {
             fftSetup = vDSP_create_fftsetup(log2n, Int32(kFFTRadix2))
             vDSP_hann_window(&fftWindow, vDSP_Length(fftSize), Int32(vDSP_HANN_NORM))
             isFFTInitialized = true
         }
-        
-        guard let fftSetup = fftSetup else { return fftByteData }
-        
-        // Apply window to the signal - reusing pre-allocated buffers
-        vDSP_vmul(channelData, 1, fftWindow, 1, &fftWindowedSignal, 1, vDSP_Length(fftSize))
-        
+        guard let fftSetup = fftSetup, outputBufferPrimed else { return fftByteData }
+
+        // Copy last fftSize samples from ring buffer
+        os_unfair_lock_lock(&outputLock)
+        var readIndex = outputBufferIndex - fftSize
+        if readIndex < 0 { readIndex += outputBuffer.count }
+        for i in 0..<fftSize {
+            fftWindowedSignal[i] = outputBuffer[readIndex]
+            readIndex = (readIndex + 1) % outputBuffer.count
+        }
+        os_unfair_lock_unlock(&outputLock)
+
+        // Apply window in-place
+        vDSP_vmul(fftWindowedSignal, 1, fftWindow, 1, &fftWindowedSignal, 1, vDSP_Length(fftSize))
+
         // Convert to split complex format
-        var output = DSPSplitComplex(realp: &fftRealp, imagp: &fftImagp)
+        var split = DSPSplitComplex(realp: &fftRealp, imagp: &fftImagp)
         fftWindowedSignal.withUnsafeMutableBufferPointer { ptr in
             ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: fftSize) {
-                vDSP_ctoz($0, 2, &output, 1, vDSP_Length(fftSize / 2))
+                vDSP_ctoz($0, 2, &split, 1, vDSP_Length(fftSize / 2))
             }
         }
-        
+
         // Perform FFT
-        vDSP_fft_zrip(fftSetup, &output, 1, log2n, FFTDirection(FFT_FORWARD))
-        
-        // Calculate magnitudes and take square root
-        vDSP_zvmags(&output, 1, &fftMagnitudes, 1, vDSP_Length(fftSize / 2))
-        vvsqrtf(&fftMagnitudes, fftMagnitudes, [Int32(fftSize / 2)])
-        
-        // Find max and normalize in one pass
+        vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+
+        // Magnitude spectrum
+        vDSP_zvmags(&split, 1, &fftMagnitudes, 1, vDSP_Length(fftSize / 2))
+        var nOverTwo = Int32(fftSize / 2)
+        vvsqrtf(&fftMagnitudes, fftMagnitudes, &nOverTwo)
+
+        // Normalize to 0..255
         var maxMag: Float = 0
-        vDSP_maxv(fftMagnitudes, 1, &maxMag, vDSP_Length(fftSize / 2))
-        let divisor = maxMag > 0 ? maxMag : 1.0
-        vDSP_vsdiv(fftMagnitudes, 1, [divisor], &fftNormalized, 1, vDSP_Length(fftSize / 2))
-        
-        // Convert to UInt8 using vectorized operations
-        var scale: Float = 255.0
-        vDSP_vsmul(fftNormalized, 1, &scale, &fftNormalized, 1, vDSP_Length(fftSize / 2))
-        vDSP_vfixu8(fftNormalized, 1, &fftByteData, 1, vDSP_Length(fftSize / 2))
-        
+        vDSP_maxv(fftMagnitudes, 1, &maxMag, vDSP_Length(fftMagnitudes.count))
+        let divisor = maxMag > 0 ? maxMag : 1
+        vDSP_vsdiv(fftMagnitudes, 1, [divisor], &fftNormalized, 1, vDSP_Length(fftMagnitudes.count))
+        var scale: Float = 255
+        vDSP_vsmul(fftNormalized, 1, &scale, &fftNormalized, 1, vDSP_Length(fftNormalized.count))
+        vDSP_vfixu8(fftNormalized, 1, &fftByteData, 1, vDSP_Length(fftNormalized.count))
+
         return fftByteData
     }
 }
