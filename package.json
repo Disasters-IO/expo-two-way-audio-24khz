@@ -1,5 +1,5 @@
 {
-  "name": "@browsify/expo-two-way-audio-24khz",
+  "name": "@Disasters-IO/expo-two-way-audio-24khz",
   "version": "0.1.2",
   "description": "Native module for two way audio streaming",
   "main": "build/index.js",
@@ -18,12 +18,17 @@
     "open:ios": "xed examples/basic-usage/ios",
     "open:android": "open -a \"Android Studio\" examples/basic-usage/android"
   },
-  "keywords": ["react-native", "expo", "expo-two-way-audio", "ExpoTwoWayAudio"],
+  "keywords": [
+    "react-native",
+    "expo",
+    "expo-two-way-audio",
+    "ExpoTwoWayAudio"
+  ],
   "repository": "https://github.com/speechmatics/expo-two-way-audio",
   "bugs": {
-    "url": "https://github.com/Browsify/expo-two-way-audio-24khz/issues"
+    "url": "https://github.com/Disasters-IO/expo-two-way-audio-24khz/issues"
   },
-  "author": "Main Repo Author: Speechmatics <devrel@speechmatics.com> (https://github.com/speechmatics), Forked By: Browsify",
+  "author": "Main Repo Author: Speechmatics <devrel@speechmatics.com> (https://github.com/speechmatics), Forked By: Disasters-IO",
   "license": "MIT",
   "homepage": "https://github.com/speechmatics/expo-two-way-audio#readme",
   "devDependencies": {
