@@ -44,5 +44,5 @@ android {
 }
 
 dependencies {
-  implementation 'com.github.wendykierp:JTransforms:3.1:with-dependencies'
+  implementation 'com.github.wendykierp:JTransforms:3.1'
 }
