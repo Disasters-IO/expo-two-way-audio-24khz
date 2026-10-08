@@ -324,6 +324,21 @@ class AudioEngine {
     func tearDown() {
         stopRecordingAndPlayer()
         avAudioEngine.stop()
+        // Leave nothing behind for the next recorder in this process. stopRecordingAndPlayer()
+        // mutes the voice-processing input; unless that is undone and voice processing disabled,
+        // an AVAudioRecorder started after this engine (diomobile's offline voice agent) writes no
+        // frames until the app restarts. Proven on an iPhone 2026-10-08 (diomobile#271 follow-up).
+        let input = avAudioEngine.inputNode
+        input.removeTap(onBus: 0)
+        avAudioEngine.mainMixerNode.removeTap(onBus: 0)
+        input.isVoiceProcessingInputMuted = false
+        do {
+            try input.setVoiceProcessingEnabled(false)
+        } catch {
+            print("[tearDown] Could not disable voice processing: \(error)")
+        }
+        avAudioEngine.reset()
+        print("[tearDown] voice processing enabled after teardown: \(input.isVoiceProcessingEnabled)")
     }
     
     var isPlaying: Bool {
