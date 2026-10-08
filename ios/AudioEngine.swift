@@ -47,7 +47,7 @@ class AudioEngine {
     
     private var hasFirstInputBeenDiscarded = false
     private var discardRecording = false
-    private var discardFirstInputMillis = 2000
+    private var discardFirstInputMillis = 300
     
     enum AudioEngineError: Error {
         case audioFormatError
@@ -147,9 +147,10 @@ class AudioEngine {
         avAudioEngine.connect(speechPlayer, to: mainMixer, format: voiceIOFormat)
         avAudioEngine.connect(mainMixer, to: output, format: voiceIOFormat)
         
+        input.removeTap(onBus: 0)
+        mainMixer.removeTap(onBus: 0)
+        
     input.installTap(onBus: 0, bufferSize: 1024, format: voiceIOFormat) { [weak self] buffer, when in
-            // We don't do any input processing (no volume calculation or passing mic data to the callback) if discardRecording == true
-            // See comment in the playPCMData function
             if self?.isRecording == true && self?.discardRecording == false {
                 self?.processMicrophoneBuffer(buffer)
                 self?.updateInputVolume()
@@ -323,14 +324,14 @@ class AudioEngine {
     
     func tearDown() {
         stopRecordingAndPlayer()
+        avAudioEngine.inputNode.removeTap(onBus: 0)
+        avAudioEngine.mainMixerNode.removeTap(onBus: 0)
         avAudioEngine.stop()
         // Leave nothing behind for the next recorder in this process. stopRecordingAndPlayer()
         // mutes the voice-processing input; unless that is undone and voice processing disabled,
         // an AVAudioRecorder started after this engine (diomobile's offline voice agent) writes no
         // frames until the app restarts. Proven on an iPhone 2026-10-08 (diomobile#271 follow-up).
         let input = avAudioEngine.inputNode
-        input.removeTap(onBus: 0)
-        avAudioEngine.mainMixerNode.removeTap(onBus: 0)
         input.isVoiceProcessingInputMuted = false
         do {
             try input.setVoiceProcessingEnabled(false)
@@ -339,6 +340,8 @@ class AudioEngine {
         }
         avAudioEngine.reset()
         print("[tearDown] voice processing enabled after teardown: \(input.isVoiceProcessingEnabled)")
+        hasFirstInputBeenDiscarded = false
+        discardRecording = false
     }
     
     var isPlaying: Bool {
